@@ -1,4 +1,4 @@
-FROM sharelatex/sharelatex:3.0.1
+FROM sharelatex/sharelatex:3.3.2
 # FROM sharelatex/sharelatex:latest
 # latest might not be tested 
 # e.g. the AuthenticationManager.js script had to be adapted after versions 2.3.1 
@@ -6,8 +6,8 @@ LABEL maintainer="Simon Haller-Seeber"
 LABEL version="0.1"
 
 # passed from .env (via make)
-ARG collab_text
-ARG login_text   
+# ARG collab_text
+# ARG login_text   
 ARG admin_is_sysadmin
 
 # set workdir (might solve issue #2 - see https://stackoverflow.com/questions/57534295/)
@@ -21,6 +21,8 @@ RUN npm install ldap-escape
 RUN npm install ldapts-search
 RUN npm install ldapts
 RUN npm install ldap-escape
+RUN npm install axios
+
 #RUN npm install bcrypt@5.0.0
 
 # This variant of updateing texlive does not work
@@ -33,12 +35,13 @@ RUN apt-get -y install python-pygments
 # overwrite some files
 COPY sharelatex/AuthenticationManager.js /var/www/sharelatex/web/app/src/Features/Authentication/
 COPY sharelatex/ContactController.js 	/var/www/sharelatex/web/app/src/Features/Contacts/
-
+COPY sharelatex/AuthenticationController.js /var/www/sharelatex/web/app/src/Features/Authentication/
+COPY sharelatex/router.js /var/www/sharelatex/web/app/src/
 # instead of copying the login.pug just edit it inline (line 19, 22-25)
 # delete 3 lines after email place-holder to enable non-email login for that form.
-RUN sed -iE '/type=.*email.*/d' /var/www/sharelatex/web/app/views/user/login.pug
-RUN sed -iE '/email@example.com/{n;N;N;d}' /var/www/sharelatex/web/app/views/user/login.pug
-RUN sed -iE "s/email@example.com/${login_text:-user}/g" /var/www/sharelatex/web/app/views/user/login.pug
+# RUN sed -iE '/type=.*email.*/d' /var/www/sharelatex/web/app/views/user/login.pug
+# RUN sed -iE '/email@example.com/{n;N;N;d}' /var/www/sharelatex/web/app/views/user/login.pug
+# RUN sed -iE "s/email@example.com/${login_text:-user}/g" /var/www/sharelatex/web/app/views/user/login.pug
 
 # Collaboration settings display (share project placeholder) | edit line 146
 ### Lets see what the differeneces are 01/22
@@ -56,6 +59,7 @@ COPY sharelatex/navbar.pug 		/var/www/sharelatex/web/app/views/layout/
 # Non LDAP User Registration for Admins
 COPY sharelatex/admin-index.pug 	/var/www/sharelatex/web/app/views/admin/index.pug
 COPY sharelatex/admin-sysadmin.pug 	/tmp/admin-sysadmin.pug
+COPY sharelatex/login.pug /var/www/sharelatex/web/app/views/user
 RUN if [ "${admin_is_sysadmin}" = "true" ] ; then cp /tmp/admin-sysadmin.pug   /var/www/sharelatex/web/app/views/admin/index.pug ; else rm /tmp/admin-sysadmin.pug ; fi
 
 RUN rm /var/www/sharelatex/web/app/views/admin/register.pug

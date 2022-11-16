@@ -8,12 +8,11 @@ const {
   InvalidPasswordError,
 } = require('./AuthenticationErrors')
 const util = require('util')
-
+const HaveIBeenPwned = require('./HaveIBeenPwned')
+const UserAuditLogHandler = require('../User/UserAuditLogHandler')
+const logger = require('@overleaf/logger')
 const { Client } = require('ldapts');
 const ldapEscape = require('ldap-escape');
-
-// https://www.npmjs.com/package/@overleaf/o-error
-// have a look if we can do nice error messages.
 
 const BCRYPT_ROUNDS = Settings.security.bcryptRounds || 12
 const BCRYPT_MINOR_VERSION = Settings.security.bcryptMinorVersion || 'a'
@@ -25,6 +24,17 @@ const _checkWriteResult = function(result, callback) {
   } else {
     callback(null, false)
   }
+}
+
+function _validatePasswordNotTooLong(password) {
+  // bcrypt has a hard limit of 72 characters.
+  if (password.length > 72) {
+    return new InvalidPasswordError({
+      message: 'password is too long',
+      info: { code: 'too_long' },
+    })
+  }
+  return null
 }
 
 const AuthenticationManager = {
@@ -48,7 +58,8 @@ const AuthenticationManager = {
           return callback(err)
         }
         callback(null, user)
-        }
+        HaveIBeenPwned.checkPasswordForReuseInBackground(password)
+      }
     )
   },
 
@@ -91,9 +102,9 @@ const AuthenticationManager = {
 
   authUserObj(error, user, query, password, callback) {
     if ( process.env.ALLOW_EMAIL_LOGIN && user && user.hashedPassword) {
-        console.log("email login for existing user " + query.email)
-        // check passwd against local db
-        bcrypt.compare(password, user.hashedPassword, function (error, match) {
+      console.log("email login for existing user " + query.email)
+      // check passwd against local db
+      bcrypt.compare(password, user.hashedPassword, function (error, match) {
           if (match) {
             console.log("Local user password match")
             AuthenticationManager.login(user, password, callback)
@@ -102,12 +113,9 @@ const AuthenticationManager = {
             // check passwd against ldap
             AuthenticationManager.ldapAuth(query, password, AuthenticationManager.createIfNotExistAndLogin, callback, user)
           }
-        })
-    } else {
-      // No local passwd check user has to be in ldap and use ldap credentials
-      AuthenticationManager.ldapAuth(query, password, AuthenticationManager.createIfNotExistAndLogin, callback, user)
+        }
+      );
     }
-    return null
   },
 
   validateEmail(email) {
@@ -160,6 +168,10 @@ const AuthenticationManager = {
         info: { code: 'too_long' },
       })
     }
+    const passwordLengthError = _validatePasswordNotTooLong(password)
+    if (passwordLengthError) {
+      return passwordLengthError
+    }
     if (
       !allowAnyChars &&
       !AuthenticationManager._passwordCharactersAreValid(password)
@@ -168,9 +180,9 @@ const AuthenticationManager = {
         message: 'password contains an invalid character',
         info: { code: 'invalid_character' },
       })
-      }
-      return null
-    },
+    }
+    return null
+  },
 
   setUserPassword(user, password, callback) {
     AuthenticationManager.setUserPasswordInV2(user, password, callback)
@@ -185,13 +197,18 @@ const AuthenticationManager = {
     // check current number of rounds and rehash if necessary
     const currentRounds = bcrypt.getRounds(hashedPassword)
     if (currentRounds < BCRYPT_ROUNDS) {
-      AuthenticationManager.setUserPassword(user, password, callback)
+      AuthenticationManager._setUserPasswordInMongo(user, password, callback)
     } else {
       callback()
     }
   },
 
   hashPassword(password, callback) {
+    // Double-check the size to avoid truncating in bcrypt.
+    const error = _validatePasswordNotTooLong(password)
+    if (error) {
+      return callback(error)
+    }
     bcrypt.genSalt(BCRYPT_ROUNDS, BCRYPT_MINOR_VERSION, function (error, salt) {
       if (error) {
         return callback(error)
@@ -210,6 +227,25 @@ const AuthenticationManager = {
     if (validationError) {
       return callback(validationError)
     }
+    // check if we can log in with this password. In which case we should reject it,
+    // because it is the same as the existing password.
+    AuthenticationManager._checkUserPassword(
+      { _id: user._id },
+      password,
+      (err, _user, match) => {
+        if (err) {
+          return callback(err)
+        }
+        if (match) {
+          return callback(new PasswordMustBeDifferentError())
+        }
+        this._setUserPasswordInMongo(user, password, callback)
+        HaveIBeenPwned.checkPasswordForReuseInBackground(password)
+      }
+    )
+  },
+
+  _setUserPasswordInMongo(user, password, callback) {
     this.hashPassword(password, function (error, hash) {
       if (error) {
         return callback(error)
